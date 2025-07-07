@@ -1,0 +1,362 @@
+import os
+from math import pi
+
+import numpy as np
+from matplotlib import pyplot as plt
+from torch import nn, optim
+import torch
+from torch.optim import Adam
+from torch.utils.data import TensorDataset, DataLoader
+
+
+# 读取数据集
+import pandas as pd
+
+# 读取数据集
+csv1_file = 'rotor angle.csv'
+df1 = pd.read_csv(csv1_file, encoding='utf-8')  # 通常使用utf-8编码
+csv2_file = 'angular velocity.csv'
+df2=pd.read_csv(csv2_file, encoding='utf-8')  # 通常使用utf-8编码
+delta0 = pd.DataFrame()
+w0 = pd.DataFrame()
+# 从第三行开始提取，每列提取到第i*2行
+# for i in range(6000):
+#     delta0[f'col_{i+1}'] = df1.iloc[2:211, i+1].astype(float)
+# for i in range(6000):
+#     w0[f'col_{i+1}']     = df2.iloc[2:211, i].astype(float)
+# delta0=delta0.T
+# w0=w0.T
+# delta0.reset_index(drop=True,inplace=True)
+# delta0.columns = range(len(delta0.columns))
+# w0.reset_index(drop=True,inplace=True)
+# w0.columns = range(len(delta0.columns))
+delta0 = df1.iloc[2:211, 1:10001].astype(float)
+w0 = df2.iloc[2:211, :10000].astype(float)
+
+# 转置DataFrame
+delta0 = delta0.T
+w0 = w0.T
+
+# 重置索引
+delta0.reset_index(drop=True, inplace=True)
+w0.reset_index(drop=True, inplace=True)
+
+# 重命名列
+delta0.columns = range(len(delta0.columns))
+w0.columns = range(len(w0.columns))
+
+class FC(nn.Module):
+    def __init__(self, i, h, o):
+        super(FC, self).__init__()
+
+        self.relu = nn.LeakyReLU(negative_slope=0.01)
+        self.fc1 = nn.Linear(i, h)
+        self.fc2 = nn.Linear(h, 1)
+        self.fc3 = nn.Linear(h, h)
+        self.fc4 = nn.Linear(h, 1)
+        self.fc5 = nn.Linear(h, h)
+        self.fc6 = nn.Linear(h, 1)
+        self.fc7 = nn.Linear(h, o)
+
+    def forward(self, x):
+        x1 = self.fc1(x)
+        x1 = self.relu(x1)
+        x2 = self.fc2(x1)
+        x2 = self.relu(x2)
+        x3 = self.fc3(x1)
+        x3 = self.relu(x3)
+        x4 = self.fc4(x3)
+        x4 = self.relu(x4)
+        x5 = self.fc5(x3)
+        x5 = self.relu(x5)
+        x6 = self.fc6(x5)
+        x6 = self.relu(x6)
+        x7 = self.fc7(x5)
+
+        return x2, x4, x6, x7
+
+def prepare_rolling_data(x_dummy, window_size, batch_size):
+    # 初始化 DataLoader 列表
+    data_loader_list = []
+
+    # 遍历时间序列，创建窗口数据
+    for i in range(window_size, 116):
+        # 为每个窗口创建输入和目标数据
+        x_input = x_dummy[0:8000, i - window_size:i]
+        x_target = torch.cat([x_dummy[0:8000, i - window_size + 1:i + 1], w_input[0:8000, i - window_size + 1:i]],
+                             dim=1)
+
+        # 将输入和目标数据转换为 TensorDataset，然后创建 DataLoader
+        dataset = TensorDataset(x_input, x_target)
+        data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        data_loader_list.append(data_loader)
+
+    return data_loader_list
+
+
+
+def rolling_forecast(net, data, num_epochs):
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(net.parameters())
+
+    for data_loader in data:
+
+        for epoch in range(num_epochs):
+            running_loss = 0
+            net.train()
+
+            for inputs, targets in data_loader:
+                all_weights = []
+                optimizer.zero_grad()
+                # 前向传播
+
+                o1, o2, o3, o4 = net(inputs)
+
+                # 计算损失
+                # 假设 targets 的第 1、2 和 3 列分别对应 x_dummy 的第 1、2 和 3 列
+                loss1 = criterion(o1, targets[:, 0:1])  # o1 与 targets 的第 1 列比较
+                loss2 = criterion(o2, targets[:, 1:2])  # o2 与 targets 的第 2 列比较
+                loss3 = criterion(o3, targets[:, 2:3])  # o3 与 targets 的第 3 列比较
+                loss4 = criterion(o4, targets[:, 3:4])  # o4 与 targets 的剩余列比较
+                loss5 = criterion((o2 - o1) / 3, targets[:, 4:5])
+                loss6 = criterion((o3 - o2) / 3, targets[:, 5:6])
+                loss7 = criterion((o4 - o3) / 3, targets[:, 6:7])
+                # 总损失是所有损失的和
+                # print(loss1,loss2,loss3,loss4,loss5,loss6,loss7)
+                loss = loss1 + loss2 + loss3 + loss4+loss5+loss6+loss7
+                loss.backward()
+                optimizer.step()
+                running_loss += loss.item()
+                if epoch == num_epochs - 1:
+                    fc1_weight = net.fc1.weight.data
+                    fc1_weight = fc1_weight.sum()
+                    fc3_weight = net.fc3.weight.data
+                    fc3_weight = fc3_weight.sum()
+                    fc5_weight = net.fc5.weight.data
+                    fc5_weight = fc5_weight.sum()
+                    fc7_weight = net.fc7.weight.data
+                    fc7_weight = fc7_weight.sum()
+                    weights = [
+                        fc1_weight,
+                        fc3_weight,
+                        fc5_weight,
+                        fc7_weight
+                    ]
+                    all_weights.append(weights)
+                    weight_matrix = torch.tensor(all_weights)
+
+            print(f'Epoch {epoch + 1}/{num_epochs}, Loss: {running_loss / len(data_loader):.4f}')
+    return weight_matrix
+
+
+def add_gaussian_noise(data, snr_db):
+    # 确保数据是DataFrame
+    if not isinstance(data, pd.DataFrame):
+        raise ValueError("Data should be a pandas DataFrame")
+
+    noisy_data = data.copy()  # 创建数据的副本以避免修改原始数据
+    for i in range(data.shape[1]):  # 遍历每一列
+        # 计算信号功率
+        signal_power = np.mean(noisy_data.iloc[:, i] ** 2)
+
+        # 将SNR从dB转换为功率比
+        snr = 10 ** (snr_db / 10)
+
+        # 计算噪声功率
+        noise_power = signal_power / snr
+
+        # 计算噪声标准差
+        sigma = np.sqrt(noise_power)
+
+        # 生成与当前列形状相同的高斯噪声
+        noise = np.random.normal(0, sigma, len(data))
+
+        # 叠加噪声到当前列的原始数据
+        noisy_data.iloc[:, i] = noisy_data.iloc[:, i].values + noise
+
+    return noisy_data
+def evaluate_rolling_model(net, x_val, y_val):
+    mse_errors = []
+    mape_errors = []
+    net.eval()  # 将模型设置为评估模式
+
+    with torch.no_grad():
+        x_val_tensor = torch.tensor(x_val.values, dtype=torch.float32)
+        y_val_tensor = torch.tensor(y_val.values, dtype=torch.float32)
+
+        # 滚动预测评估
+        for i in range(116):  # 假设窗口大小为4
+            # 获取当前窗口的数据
+            x_window = x_val_tensor[:, i:i + 4]
+            print(x_window.shape)
+            y_window = y_val_tensor[:, i:i + 1]
+            # print(x_window.shape)
+            # print(y_window.shape)
+            # 进行预测
+            outputs = net(x_window)
+
+            cc = outputs[3]  # 假设我们关注的是模型输出的第四个值
+            mse = 0
+            mape1 = 0
+            for j in range(2000):
+                mse += (cc[j] - y_window[j]) ** 2
+                mape1 += torch.abs((cc[i] - y_window[i]) / y_window[i])
+            print("mse：", mse / 2000)
+            print("mape：", mape1 / 2000)
+            mse_errors.append(mse.item() / 2000)
+            mape_errors.append(mape1.item() / 2000)
+
+            # 将结果转换为DataFrame并保存到Excel文件
+        results_df = pd.DataFrame({
+            'MSE': mse_errors,
+            'MAPE': mape_errors
+        })
+
+        # 保存到Excel文件
+        results_df.to_excel('results.xlsx', index=False)
+
+        print("数据已保存到Excel文件中。")
+
+if __name__ == '__main__':
+    # 设置批量大小
+
+    all_results = []
+    # 初始化网络
+    net = FC(4,200, 1)
+    # 将数据转换为 PyTorch 张量
+    # x_dummy = torch.tensor(delta0.iloc[0:6000, 40:190].values, dtype=torch.float32)
+    x_part1 = torch.tensor(delta0.iloc[0:2000, 40:190].values, dtype=torch.float32)  #k-fold cross
+    x_part2 = torch.tensor(delta0.iloc[4000:10000, 40:190].values, dtype=torch.float32)
+
+    #沿 dim=0（行方向）拼接
+    x_dummy = torch.cat([x_part1, x_part2], dim=0)
+    w_tensor1 = torch.tensor(w0.iloc[0:2000, 40:190].values, dtype=torch.float32)
+    w_tensor2 = torch.tensor(w0.iloc[4000:10000, 40:190].values, dtype=torch.float32)
+
+    # 沿行维度拼接（dim=0）
+    w_input = torch.cat([w_tensor1, w_tensor2], dim=0)
+    # w_input = torch.tensor(w0.iloc[0:6000, 40:190].values, dtype=torch.float32)
+    # y_dummy = torch.tensor(delta0.iloc[0:1000, 4].values, dtype=torch.float32)
+    # w_loss= torch.tensor(w0.iloc[0:4000, 1:4].values, dtype=torch.float32)
+    # d0=torch.tensor(delta0.iloc[0:4000,4:5].values,dtype=torch.float32)
+    # y_dummy=torch.cat((d0,w_loss),dim=1)
+    # y_dummy = torch.tensor(y_dummy, dtype=torch.float32)
+    # x0_dummy = x_dummy[:, 0:4]  # 第 0-3 列作为输入
+    # targets_dummy = torch.cat([x_dummy[0:4000, 1:4], y_dummy], dim=1)  # 其余列和目标值作为目标数据
+    # 滚动预测和更新函数
+    # 定义窗口大小和批量大小
+    window_size = 4
+    batch_size = 256
+    num_epochs = 100 # 根据您的情况调整批量大小
+    # 准备滚动数据
+    data = prepare_rolling_data(x_dummy, window_size, batch_size)
+    # 执行滚动预测
+    weight_matrix = rolling_forecast(net, data, num_epochs)
+    print(weight_matrix)
+    x_val = delta0.iloc[2000:4000, 40:190]  # 特征数据
+    # x_val = add_gaussian_noise(x_val, 60)  # 添加噪声
+    y_val = delta0.iloc[2000:4000, 44:190]  # 目标数据
+    w_val=w0.iloc[2000:4000,40:190]
+    # 调用评估函数
+    evaluate_rolling_model(net, x_val, y_val)
+
+
+    x_val_tensor = torch.tensor(x_val.values, dtype=torch.float32)
+    y_val_tensor = torch.tensor(y_val.values, dtype=torch.float32)
+    w_val_tensor = torch.tensor(w_val.values, dtype=torch.float32)
+
+    net.eval()
+    # 滚动预测评估
+    mse_errors = []
+    mape_errors = []
+    for i in range(116):  # 假设窗口大小为4
+        # 获取当前窗口的数据
+        x_window = x_val_tensor[:, i:i + 4]
+        w_window=w_val_tensor[:, i:i + 4]
+        y_window = y_val_tensor[:, i:i + 1]
+        L=w_window*np.array(weight_matrix)
+        print(weight_matrix)
+        # L = L.unsqueeze(1)
+        outputs1 = net(x_window)
+        c = outputs1[3]
+
+        L=(L[:, 0:1] + 2*L[:, 1:2] + 2*L[:, 2:3]+L[:,3:4]) / (6 * 60)
+        c=c+L
+        mse = 0
+        mape1 = 0
+        for j in range(1000):
+            mse += (c[j] - y_window[j]) ** 2
+            mape1 += torch.abs((c[i] - y_window[i]) / y_window[i])
+        print("mse：", mse / 1000)
+        print("mape：", mape1 / 1000)
+        mse_errors.append(mse.item() / 1000)
+        mape_errors.append(mape1.item() / 1000)
+
+    # 将结果转换为DataFrame并保存到Excel文件
+    results_df = pd.DataFrame({
+        'MSE': mse_errors,
+        'MAPE': mape_errors
+    })
+
+    # 保存到Excel文件
+    results_df.to_excel('proposed-results.xlsx', index=False)
+
+    print("数据已保存到Excel文件中。")
+
+
+
+# #画图
+#
+#     x_val1 = delta0.iloc[5030:5040, 40:160]  # 转换为numpy数组以便使用
+#     y_val1 = delta0.iloc[5030:5040, 44:160]
+#     w_val1 = w0.iloc[5030:5040, 40:160]
+#     x_val1 = torch.tensor(x_val1.values, dtype=torch.float32)
+#     y_val1 = torch.tensor(y_val1.values, dtype=torch.float32)
+#     w_val1 = torch.tensor(w_val1.values, dtype=torch.float32)
+#     y_val1 = y_val1.unsqueeze(-1)
+#     cc_list = []  # 创建一个空列表来存储每次循环的cc张量
+#     net.eval()
+#
+#     for i in range(100):  # 假设窗口大小为4
+#         # 获取当前窗口的数据
+#         x_window = x_val1[:, i:i + 4]
+#         w_window=w_val1[:, i:i + 4]
+#         outputs = net(x_window)
+#         x_window = torch.tensor(x_window).unsqueeze(0).transpose(0, 1)  # 转换为torch张量
+#
+#         L=w_window*np.array(weight_matrix)
+#         L = L.unsqueeze(1)
+#
+#         L = (L[:, 0:1] + L[:, 1:2] + L[:, 2:3] + L[:, 3:4]) / (4 * 60)
+#         cc = outputs[3]
+#         cc=cc-L
+#         cc = cc.reshape(10, 1)
+#
+#         # 将cc添加到列表中
+#         cc_list.append(cc)
+#
+#     # 循环结束后，使用torch.stack将cc_list中的所有张量堆叠成一个10*26的张量
+#     cc_stacked = torch.stack(cc_list)
+#
+#     cc_reshaped=cc_stacked.detach().numpy()
+#         # all_predictions_numpy = all_predictions.detach().numpy()
+#
+#     for sample_idx in range(10):
+#         plt.figure(figsize=(10, 6))  # 设置图形大小
+#         plt.plot(y_val1[sample_idx, :], label='True Values')  # 绘制真实值
+#         plt.plot(cc_reshaped[:, sample_idx], label='Predictions')  # 绘制预测值
+#         data_sample = y_val1[sample_idx, :]
+#         data_reshaped = cc_reshaped[:, sample_idx]
+#         print(data_reshaped)
+#         print(data_sample)
+#
+#         # 添加图例
+#         plt.legend()
+#
+#         # 添加标题和轴标签
+#         plt.title(f'Sample {sample_idx + 1} - Comparison of True Values and Predictions')
+#         plt.xlabel('Time Step')
+#         plt.ylabel('Value')
+#
+#         # 显示图形
+#         plt.show()
